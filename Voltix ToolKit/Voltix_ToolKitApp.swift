@@ -1,10 +1,3 @@
-//
-//  Voltix_ToolKitApp.swift
-//  Voltix ToolKit
-//
-//  Created by Артём Коротков on 22.06.2026.
-//
-
 import SwiftUI
 
 @main
