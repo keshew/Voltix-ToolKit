@@ -1,13 +1,17 @@
 import SwiftUI
 
 struct ContentView: View {
+    var holdSplash = false
+
     @AppStorage("hasSeenVoltixWelcome") private var hasSeenWelcome = false
     @State private var showSplash = true
+    @State private var splashProgress = 0.0
+    @State private var didCompleteSplashProgress = false
 
     var body: some View {
         ZStack {
             if showSplash {
-                SplashView()
+                SplashView(progress: splashProgress)
                     .transition(.opacity)
             } else if !hasSeenWelcome {
                 WelcomeView {
@@ -23,13 +27,32 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .task {
-            try? await Task.sleep(for: .seconds(2.1))
-            withAnimation(.easeOut(duration: 0.55)) { showSplash = false }
+            let steps = 28
+            for step in 1...steps {
+                try? await Task.sleep(for: .milliseconds(70))
+                withAnimation(.easeOut(duration: 0.18)) {
+                    splashProgress = Double(step) / Double(steps)
+                }
+            }
+            try? await Task.sleep(for: .milliseconds(180))
+            didCompleteSplashProgress = true
+            completeSplashIfReady()
+        }
+        .onChange(of: holdSplash) { _ in
+            completeSplashIfReady()
+        }
+    }
+
+    private func completeSplashIfReady() {
+        guard didCompleteSplashProgress, !holdSplash, showSplash else { return }
+        withAnimation(.easeOut(duration: 0.55)) {
+            showSplash = false
         }
     }
 }
 
 struct SplashView: View {
+    let progress: Double
     @State private var phase: CGFloat = -1
     @State private var revealed = false
 
@@ -76,6 +99,18 @@ struct SplashView: View {
                     .font(.system(size: 10, weight: .semibold))
                     .tracking(2.2)
                     .foregroundStyle(VoltixTheme.secondaryText)
+
+                VStack(spacing: 8) {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.linear)
+                        .tint(VoltixTheme.cyan)
+                        .frame(width: 176)
+                    Text("\(Int(progress * 100))%")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundStyle(VoltixTheme.secondaryText)
+                }
+                .padding(.top, 14)
             }
             .opacity(revealed ? 1 : 0)
             .scaleEffect(revealed ? 1 : 0.92)
