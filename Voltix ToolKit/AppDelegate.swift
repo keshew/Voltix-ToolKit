@@ -13,11 +13,6 @@ final class AdjustAttributionHandler: NSObject, AdjustDelegate {
     func adjustAttributionChanged(_ attribution: ADJAttribution?) {
         guard let attribution else { return }
 
-        if #available(iOS 14, *),
-           ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
-            return
-        }
-
         guard let jsonResponse = attribution.jsonResponse,
               let data = try? JSONSerialization.data(withJSONObject: jsonResponse, options: []),
               let jsonString = String(data: data, encoding: .utf8) else {

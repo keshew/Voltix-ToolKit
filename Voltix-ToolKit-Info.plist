@@ -9,6 +9,8 @@
 		<key>NSAllowsArbitraryLoads</key>
 		<true/>
 	</dict>
+	<key>NSUserTrackingUsageDescription</key>
+	<string>This identifier helps personalize app experience and measure app performance.</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>remote-notification</string>
