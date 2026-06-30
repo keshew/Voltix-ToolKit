@@ -14,7 +14,6 @@ private enum WebBootstrapPhase: Equatable {
 private extension Notification.Name {
     static let webFlowShouldShowFallback = Notification.Name("webFlowShouldShowFallback")
     static let debugLogsRequested = Notification.Name("debugLogsRequested")
-    static let debugLogsUpdated = Notification.Name("debugLogsUpdated")
 }
 
 private enum WebFlowFallback {
@@ -39,14 +38,12 @@ final class DebugLogStore: ObservableObject {
             if self.lines.count > 500 {
                 self.lines.removeFirst(self.lines.count - 500)
             }
-            NotificationCenter.default.post(name: .debugLogsUpdated, object: nil)
         }
     }
 
     func clear() {
         DispatchQueue.main.async {
             self.lines.removeAll()
-            NotificationCenter.default.post(name: .debugLogsUpdated, object: nil)
         }
     }
 
@@ -306,36 +303,19 @@ private final class WebBootstrapViewModel: ObservableObject {
     }
 
     private func waitForAdjustAttribution(upToSeconds seconds: Int) async -> [String: Any] {
-        DebugLogStore.shared.append("Waiting Adjust attribution via SDK timeout=\(seconds)s")
-        if let sdkAttribution = await adjustAttributionFromSDK(timeoutMilliseconds: seconds * 1_000) {
-            let normalizedAttribution = normalizedAdjustAttribution(from: sdkAttribution)
-            DebugLogStore.shared.append("Adjust SDK attribution=\(jsonString(from: normalizedAttribution))")
-            if attributionHasCampaignSignal(normalizedAttribution) {
-                UserDefaults.standard.set(normalizedAttribution["jsonResponse"] as? String ?? "", forKey: "lastAdjustAttribution")
+        DebugLogStore.shared.append("Waiting Adjust attribution from storage timeout=\(seconds)s")
+        let deadline = Date().addingTimeInterval(TimeInterval(seconds))
+        repeat {
+            if let jsonDictionary = storedAdjustAttributionDictionary() {
+                let normalizedAttribution = normalizedAdjustAttribution(from: jsonDictionary)
+                DebugLogStore.shared.append("Stored Adjust attribution=\(jsonString(from: normalizedAttribution))")
                 return normalizedAttribution
             }
-            print("WEB FLOW Adjust attribution without campaign signal:", normalizedAttribution)
-        }
+            try? await Task.sleep(nanoseconds: 250_000_000)
+        } while Date() < deadline
 
-        if let jsonDictionary = storedAdjustAttributionDictionary() {
-            let normalizedAttribution = normalizedAdjustAttribution(from: jsonDictionary)
-            DebugLogStore.shared.append("Stored Adjust attribution=\(jsonString(from: normalizedAttribution))")
-            if attributionHasCampaignSignal(normalizedAttribution) {
-                return normalizedAttribution
-            }
-            print("WEB FLOW stored Adjust attribution without campaign signal:", normalizedAttribution)
-        }
-
-        DebugLogStore.shared.append("No Adjust attribution with campaign signal, sending empty adjust")
+        DebugLogStore.shared.append("No Adjust attribution in storage, sending empty adjust")
         return [:]
-    }
-
-    private func adjustAttributionFromSDK(timeoutMilliseconds: Int) async -> ADJAttribution? {
-        await withCheckedContinuation { continuation in
-            Adjust.attribution(withTimeout: timeoutMilliseconds) { attribution in
-                continuation.resume(returning: attribution)
-            }
-        }
     }
 
     private func storedAdjustAttributionDictionary() -> [String: Any]? {
@@ -347,31 +327,6 @@ private final class WebBootstrapViewModel: ObservableObject {
         }
 
         return jsonDictionary
-    }
-
-    private func normalizedAdjustAttribution(from attribution: ADJAttribution) -> [String: Any] {
-        let jsonResponse = attribution.jsonResponse as? [String: Any] ?? attribution.dictionary() as? [String: Any] ?? [:]
-        let jsonString: String
-        if let data = try? JSONSerialization.data(withJSONObject: jsonResponse, options: []),
-           let encoded = String(data: data, encoding: .utf8) {
-            jsonString = encoded
-        } else {
-            jsonString = ""
-        }
-
-        return [
-            "trackerToken": attribution.trackerToken ?? "",
-            "trackerName": attribution.trackerName ?? "",
-            "network": attribution.network ?? "",
-            "campaign": attribution.campaign ?? "",
-            "adgroup": attribution.adgroup ?? "",
-            "creative": attribution.creative ?? "",
-            "clickLabel": attribution.clickLabel ?? "",
-            "costType": attribution.costType ?? "",
-            "costAmount": attribution.costAmount?.doubleValue ?? 0,
-            "costCurrency": attribution.costCurrency ?? "",
-            "jsonResponse": jsonString
-        ]
     }
 
     private func normalizedAdjustAttribution(from jsonDictionary: [String: Any]) -> [String: Any] {
@@ -396,30 +351,6 @@ private final class WebBootstrapViewModel: ObservableObject {
             "costCurrency": jsonDictionary["costCurrency"] as? String ?? "",
             "jsonResponse": jsonString
         ]
-    }
-
-    private func attributionHasCampaignSignal(_ jsonDictionary: [String: Any]) -> Bool {
-        func text(_ key: String) -> String {
-            (jsonDictionary[key] as? String ?? "")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-
-        if !text("campaign").isEmpty { return true }
-        if !text("adgroup").isEmpty { return true }
-        if !text("creative").isEmpty { return true }
-        if !text("clickLabel").isEmpty { return true }
-
-        let network = text("network").lowercased()
-        if !network.isEmpty, network != "organic" {
-            return true
-        }
-
-        let trackerName = text("trackerName").lowercased()
-        if !trackerName.isEmpty, trackerName != "organic" {
-            return true
-        }
-
-        return false
     }
 
     private func configureControlsLink() async {
@@ -707,20 +638,6 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
     private let maxMainLoadRetries = 2
     private var contentProcessTerminateRetryCount = 0
     private let maxContentProcessTerminateRetries = 2
-#if DEBUG
-    private var debugButton: UIButton?
-    private var debugOverlay: UIView?
-    private var debugTextView: UITextView?
-    private var debugLogsObserver: NSObjectProtocol?
-#endif
-
-    deinit {
-#if DEBUG
-        if let debugLogsObserver {
-            NotificationCenter.default.removeObserver(debugLogsObserver)
-        }
-#endif
-    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -730,20 +647,11 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
         setNeedsUpdateOfSupportedInterfaceOrientations()
         navigationController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         configureMainWebView()
-#if DEBUG
-        configureDebugControls()
-#endif
         loadIfNeeded()
     }
 
     override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
-        becomeFirstResponder()
-#if DEBUG
-        if let debugButton {
-            view.bringSubviewToFront(debugButton)
-        }
-#endif
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -766,18 +674,6 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         .allButUpsideDown
-    }
-
-    override var canBecomeFirstResponder: Bool {
-        true
-    }
-
-    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        guard motion == .motionShake else { return }
-#if DEBUG
-        DebugLogStore.shared.append("Shake detected in WebFlowViewController, opening debug overlay")
-        showDebugOverlay()
-#endif
     }
 
     func loadIfNeeded() {
@@ -830,155 +726,6 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
 
         webView = createdWebView
     }
-
-#if DEBUG
-    private func configureDebugControls() {
-        let button = UIButton(type: .system)
-        button.setTitle("DBG", for: .normal)
-        button.setTitleColor(.white, for: .normal)
-        button.titleLabel?.font = .monospacedSystemFont(ofSize: 12, weight: .bold)
-        button.backgroundColor = UIColor.black.withAlphaComponent(0.76)
-        button.layer.cornerRadius = 8
-        button.layer.masksToBounds = true
-        button.addTarget(self, action: #selector(showDebugOverlay), for: .touchUpInside)
-        button.translatesAutoresizingMaskIntoConstraints = false
-
-        view.addSubview(button)
-        NSLayoutConstraint.activate([
-            button.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
-            button.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
-            button.widthAnchor.constraint(equalToConstant: 54),
-            button.heightAnchor.constraint(equalToConstant: 36)
-        ])
-        debugButton = button
-
-        debugLogsObserver = NotificationCenter.default.addObserver(
-            forName: .debugLogsUpdated,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            self?.refreshDebugText()
-        }
-    }
-
-    @objc private func showDebugOverlay() {
-        if debugOverlay != nil {
-            refreshDebugText()
-            return
-        }
-
-        let overlay = UIView()
-        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.32)
-        overlay.translatesAutoresizingMaskIntoConstraints = false
-
-        let panel = UIView()
-        panel.backgroundColor = .systemBackground
-        panel.layer.cornerRadius = 8
-        panel.layer.shadowColor = UIColor.black.cgColor
-        panel.layer.shadowOpacity = 0.24
-        panel.layer.shadowRadius = 18
-        panel.layer.shadowOffset = CGSize(width: 0, height: 8)
-        panel.translatesAutoresizingMaskIntoConstraints = false
-
-        let title = UILabel()
-        title.text = "Debug"
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
-        title.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let copyButton = makeDebugToolbarButton(title: "Copy", action: #selector(copyDebugLogs))
-        let clearButton = makeDebugToolbarButton(title: "Clear", action: #selector(clearDebugLogs))
-        let closeButton = makeDebugToolbarButton(title: "Close", action: #selector(hideDebugOverlay))
-
-        let toolbar = UIStackView(arrangedSubviews: [title, copyButton, clearButton, closeButton])
-        toolbar.axis = .horizontal
-        toolbar.alignment = .center
-        toolbar.spacing = 8
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-
-        let divider = UIView()
-        divider.backgroundColor = .separator
-        divider.translatesAutoresizingMaskIntoConstraints = false
-
-        let textView = UITextView()
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.alwaysBounceVertical = true
-        textView.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        textView.backgroundColor = .systemBackground
-        textView.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
-        textView.translatesAutoresizingMaskIntoConstraints = false
-
-        view.addSubview(overlay)
-        overlay.addSubview(panel)
-        panel.addSubview(toolbar)
-        panel.addSubview(divider)
-        panel.addSubview(textView)
-
-        NSLayoutConstraint.activate([
-            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            overlay.topAnchor.constraint(equalTo: view.topAnchor),
-            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-
-            panel.leadingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.leadingAnchor, constant: 10),
-            panel.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -10),
-            panel.topAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.topAnchor, constant: 48),
-            panel.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -48),
-
-            toolbar.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
-            toolbar.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
-            toolbar.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
-            toolbar.heightAnchor.constraint(equalToConstant: 34),
-
-            divider.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
-            divider.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
-            divider.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10),
-            divider.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
-
-            textView.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
-            textView.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
-            textView.topAnchor.constraint(equalTo: divider.bottomAnchor),
-            textView.bottomAnchor.constraint(equalTo: panel.bottomAnchor)
-        ])
-
-        debugOverlay = overlay
-        debugTextView = textView
-        refreshDebugText()
-        view.bringSubviewToFront(overlay)
-    }
-
-    private func makeDebugToolbarButton(title: String, action: Selector) -> UIButton {
-        let button = UIButton(type: .system)
-        button.setTitle(title, for: .normal)
-        button.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
-        button.addTarget(self, action: action, for: .touchUpInside)
-        return button
-    }
-
-    private func refreshDebugText() {
-        guard let debugTextView else { return }
-        debugTextView.text = DebugLogStore.shared.text.isEmpty ? "No logs yet" : DebugLogStore.shared.text
-        let bottom = NSRange(location: max(debugTextView.text.count - 1, 0), length: 1)
-        debugTextView.scrollRangeToVisible(bottom)
-    }
-
-    @objc private func copyDebugLogs() {
-        UIPasteboard.general.string = DebugLogStore.shared.text
-    }
-
-    @objc private func clearDebugLogs() {
-        DebugLogStore.shared.clear()
-    }
-
-    @objc private func hideDebugOverlay() {
-        debugOverlay?.removeFromSuperview()
-        debugOverlay = nil
-        debugTextView = nil
-        if let debugButton {
-            view.bringSubviewToFront(debugButton)
-        }
-    }
-#endif
 
     private func loadMainURL(_ url: URL, reason: String, resetRetries: Bool) {
         guard let webView else { return }
@@ -1180,11 +927,6 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             createdPopup.topAnchor.constraint(equalTo: view.topAnchor),
             createdPopup.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
-#if DEBUG
-        if let debugButton {
-            view.bringSubviewToFront(debugButton)
-        }
-#endif
 
         return createdPopup
     }
