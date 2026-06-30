@@ -7,7 +7,11 @@ import UIKit
 import UserNotifications
 
 private let adjustAppToken = "hpk9t70g0hds"
+#if DEBUG
+private let adjustEnvironment = ADJEnvironmentSandbox
+#else
 private let adjustEnvironment = ADJEnvironmentProduction
+#endif
 
 final class AdjustAttributionHandler: NSObject, AdjustDelegate {
     func adjustAttributionChanged(_ attribution: ADJAttribution?) {
@@ -56,6 +60,13 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         Messaging.messaging().delegate = self
         Messaging.messaging().isAutoInitEnabled = true
+
+#if DEBUG
+        Adjust.setTestOptions(["teardown": true, "deleteState": true])
+        UserDefaults.standard.removeObject(forKey: "lastAdjustAttribution")
+        print("DEBUG Adjust state reset before init")
+        DebugLogStore.shared.append("DEBUG Adjust state reset before init")
+#endif
 
         let adjustConfig = ADJConfig(appToken: adjustAppToken, environment: adjustEnvironment)
         adjustConfig?.delegate = adjustAttributionHandler

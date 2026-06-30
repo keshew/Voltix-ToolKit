@@ -2,6 +2,7 @@ import AdjustSdk
 import AdSupport
 import AppTrackingTransparency
 import SwiftUI
+import UIKit
 @preconcurrency import WebKit
 
 private enum WebBootstrapPhase: Equatable {
@@ -34,8 +35,8 @@ final class DebugLogStore: ObservableObject {
         DispatchQueue.main.async {
             let timestamp = self.formatter.string(from: Date())
             self.lines.append("[\(timestamp)] \(message)")
-            if self.lines.count > 400 {
-                self.lines.removeFirst(self.lines.count - 400)
+            if self.lines.count > 500 {
+                self.lines.removeFirst(self.lines.count - 500)
             }
         }
     }
@@ -122,11 +123,11 @@ private final class WebBootstrapViewModel: ObservableObject {
         await requestATTAndStoreIDFA()
         await waitForFCMToken(upToSeconds: 5)
         print("WEB FLOW bootstrap trigger=\(trigger)")
+        DebugLogStore.shared.append("Bootstrap after tokens trigger=\(trigger)")
 
-        if let cachedTaskLink = normalizeURLString(UserDefaults.standard.string(forKey: "taskLink")),
-           trigger == "start" {
+        let cachedTaskLink = normalizeURLString(UserDefaults.standard.string(forKey: "taskLink"))
+        if let cachedTaskLink {
             DebugLogStore.shared.append("Cached taskLink exists: \(cachedTaskLink)")
-            await MainActor.run { self.phase = .web(cachedTaskLink) }
         }
 
         if normalizeURLString(UserDefaults.standard.string(forKey: "controlsLink")) == nil {
@@ -135,8 +136,8 @@ private final class WebBootstrapViewModel: ObservableObject {
         }
 
         guard let controlsLinkString = normalizeURLString(UserDefaults.standard.string(forKey: "controlsLink")) else {
-            DebugLogStore.shared.append("controlsLink is still missing, fallback native")
-            await MainActor.run { self.phase = .native }
+            DebugLogStore.shared.append("controlsLink missing after fetch, fallback")
+            await showCachedTaskLinkOrNative(cachedTaskLink, trigger: trigger)
             return
         }
         DebugLogStore.shared.append("controlsLink=\(controlsLinkString)")
@@ -171,7 +172,7 @@ private final class WebBootstrapViewModel: ObservableObject {
 
         guard let controlsURL = components?.url else {
             DebugLogStore.shared.append("Failed to build controls URL from \(controlsLinkString)")
-            await MainActor.run { self.phase = .native }
+            await showCachedTaskLinkOrNative(cachedTaskLink, trigger: trigger)
             return
         }
 
@@ -193,13 +194,12 @@ private final class WebBootstrapViewModel: ObservableObject {
             if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
                 print("WEB FLOW bootstrap bad status=\(httpResponse.statusCode)")
                 DebugLogStore.shared.append("POST response bad status=\(httpResponse.statusCode) body=\(String(data: data, encoding: .utf8) ?? "")")
-                await MainActor.run { self.phase = .native }
+                await showCachedTaskLinkOrNative(cachedTaskLink, trigger: trigger)
                 return
             }
             if let httpResponse = response as? HTTPURLResponse {
                 DebugLogStore.shared.append("POST response status=\(httpResponse.statusCode) body=\(String(data: data, encoding: .utf8) ?? "")")
             }
-
             let decoded = try JSONDecoder().decode(WebFlowResponse.self, from: data)
             UserDefaults.standard.set(decoded.clientID, forKey: "client_id")
             DebugLogStore.shared.append("Decoded response client_id=\(decoded.clientID) response=\(decoded.response ?? "nil")")
@@ -222,11 +222,18 @@ private final class WebBootstrapViewModel: ObservableObject {
         } catch {
             print("WEB FLOW bootstrap error=\(error.localizedDescription)")
             DebugLogStore.shared.append("POST error=\(error.localizedDescription)")
-            await MainActor.run { self.phase = .native }
+            await showCachedTaskLinkOrNative(cachedTaskLink, trigger: trigger)
         }
     }
 
-
+    @MainActor
+    private func showCachedTaskLinkOrNative(_ cachedTaskLink: String?, trigger: String) {
+        if trigger == "start", let cachedTaskLink {
+            phase = .web(cachedTaskLink)
+        } else {
+            phase = .native
+        }
+    }
 
     @MainActor
     private func requestPushPermissionAndRegister() async {
@@ -632,9 +639,11 @@ private struct WebFlowResponse: Codable {
 
 struct RootContentView: View {
     @StateObject private var webBootstrapViewModel = WebBootstrapViewModel()
-    @ObservedObject private var debugLogStore = DebugLogStore.shared
     @State private var didStartBootstrap = false
+#if DEBUG
+    @ObservedObject private var debugLogStore = DebugLogStore.shared
     @State private var showDebugLogs = false
+#endif
 
     private let tokenReceivedPublisher = NotificationCenter.default.publisher(
         for: NSNotification.Name("tokenReceivedPublisher")
@@ -643,10 +652,11 @@ struct RootContentView: View {
     private let webFlowFailedPublisher = NotificationCenter.default.publisher(
         for: .webFlowShouldShowFallback
     )
-
+#if DEBUG
     private let debugLogsRequestedPublisher = NotificationCenter.default.publisher(
         for: .debugLogsRequested
     )
+#endif
 
     var body: some View {
         ZStack {
@@ -656,8 +666,37 @@ struct RootContentView: View {
                 WebFlowScreen(taskLink: taskLink)
                     .ignoresSafeArea()
             }
+#if DEBUG
+            if case .web = webBootstrapViewModel.phase, !showDebugLogs {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button("DBG") {
+                            showDebugLogs = true
+                        }
+                        .font(.system(size: 12, weight: .bold, design: .monospaced))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(Color.black.opacity(0.72))
+                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    Spacer()
+                }
+                .padding(.top, 12)
+                .padding(.trailing, 12)
+                .zIndex(10)
+            }
+
+            if showDebugLogs {
+                DebugLogOverlay(store: debugLogStore, isPresented: $showDebugLogs)
+                    .zIndex(20)
+            }
+#endif
         }
+#if DEBUG
         .background(ShakeDetectorView())
+#endif
         .onAppear {
             guard !didStartBootstrap else { return }
             didStartBootstrap = true
@@ -673,15 +712,15 @@ struct RootContentView: View {
             DebugLogStore.shared.append("Web flow fallback requested reason=\(reason)")
             webBootstrapViewModel.handleWebFlowFailure(reason: reason)
         }
+#if DEBUG
         .onReceive(debugLogsRequestedPublisher) { _ in
             showDebugLogs = true
         }
-        .sheet(isPresented: $showDebugLogs) {
-            DebugLogView(store: debugLogStore)
-        }
+#endif
     }
 }
 
+#if DEBUG
 private struct ShakeDetectorView: UIViewControllerRepresentable {
     func makeUIViewController(context: Context) -> ShakeDetectorViewController {
         ShakeDetectorViewController()
@@ -703,41 +742,58 @@ private final class ShakeDetectorViewController: UIViewController {
 
     override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
         guard motion == .motionShake else { return }
-        DebugLogStore.shared.append("Shake detected, opening debug logs")
+        DebugLogStore.shared.append("Shake detected, opening debug overlay")
         NotificationCenter.default.post(name: .debugLogsRequested, object: nil)
     }
 }
 
-private struct DebugLogView: View {
+private struct DebugLogOverlay: View {
     @ObservedObject var store: DebugLogStore
-    @Environment(\.dismiss) private var dismiss
+    @Binding var isPresented: Bool
 
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                Text(store.text.isEmpty ? "No logs yet" : store.text)
-                    .font(.system(size: 11, weight: .regular, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(14)
-            }
-            .navigationTitle("Debug Logs")
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+        ZStack {
+            Color.black.opacity(0.32)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack(spacing: 8) {
+                    Text("Debug")
+                        .font(.system(size: 15, weight: .semibold))
+                    Spacer()
+                    Button("Copy") {
+                        UIPasteboard.general.string = store.text
+                    }
                     Button("Clear") {
                         store.clear()
                     }
-                }
-
-                ToolbarItem(placement: .topBarTrailing) {
                     Button("Close") {
-                        dismiss()
+                        isPresented = false
                     }
                 }
+                .buttonStyle(.bordered)
+                .padding(10)
+
+                Divider()
+
+                ScrollView {
+                    Text(store.text.isEmpty ? "No logs yet" : store.text)
+                        .font(.system(size: 10, weight: .regular, design: .monospaced))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                }
+                .background(Color(.systemBackground))
             }
+            .background(Color(.systemBackground))
+            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+            .shadow(color: .black.opacity(0.24), radius: 18, x: 0, y: 8)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 48)
         }
     }
 }
+#endif
 
 private struct WebFlowScreen: UIViewControllerRepresentable {
     let taskLink: String
@@ -859,6 +915,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
         }
         lastMainURL = url
         print("WEB FLOW loadMainURL reason=\(reason) url=\(url.absoluteString)")
+        DebugLogStore.shared.append("WEB loadMainURL reason=\(reason) url=\(url.absoluteString)")
         webView.load(URLRequest(url: url))
     }
 
@@ -887,6 +944,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             let serializedRule = "\(parsedRule.gameId)___\(parsedRule.provider)"
             UserDefaults.standard.set(serializedRule, forKey: "changeTopRule")
             print("WEB FLOW changetop rule saved=\(serializedRule)")
+            DebugLogStore.shared.append("WEB changetop rule saved=\(serializedRule)")
         }
 
         components.queryItems = filteredItems.isEmpty ? nil : filteredItems
@@ -921,6 +979,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             }
         } catch {
             print("WEB FLOW restoreCookies error=\(error.localizedDescription)")
+            DebugLogStore.shared.append("WEB restoreCookies error=\(error.localizedDescription)")
             UserDefaults.standard.removeObject(forKey: "cookie")
         }
     }
@@ -932,18 +991,23 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             UserDefaults.standard.set(encoded, forKey: "cookie")
         } catch {
             print("WEB FLOW persistCookies error=\(error.localizedDescription)")
+            DebugLogStore.shared.append("WEB persistCookies error=\(error.localizedDescription)")
         }
     }
 
     func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == "lmLogger" else { return }
         print("WEB FLOW JS:", String(describing: message.body))
+        DebugLogStore.shared.append("WEB JS: \(String(describing: message.body))")
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
         if webView === self.webView {
             mainLoadRetryCount = 0
             contentProcessTerminateRetryCount = 0
+            DebugLogStore.shared.append("WEB didFinish main url=\(webView.url?.absoluteString ?? "nil")")
+        } else {
+            DebugLogStore.shared.append("WEB didFinish popup url=\(webView.url?.absoluteString ?? "nil")")
         }
         persistCookies()
     }
@@ -962,10 +1026,12 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             return
         }
         guard contentProcessTerminateRetryCount < maxContentProcessTerminateRetries else {
+            DebugLogStore.shared.append("WEB content process terminated, fallback")
             triggerFallbackIfNeeded(reason: "content-process-terminated", for: webView)
             return
         }
         contentProcessTerminateRetryCount += 1
+        DebugLogStore.shared.append("WEB content process terminated, retry=\(contentProcessTerminateRetryCount)")
         if let mainURL = lastMainURL {
             loadMainURL(mainURL, reason: "content-process-retry-\(contentProcessTerminateRetryCount)", resetRetries: false)
         } else {
@@ -997,11 +1063,14 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             let status = response.statusCode
             if status >= 400, navigationResponse.isForMainFrame {
                 if shouldFallbackForHTTPStatus(status) {
+                    DebugLogStore.shared.append("WEB main response status=\(status), fallback")
                     triggerFallbackIfNeeded(reason: "http-\(status)", for: webView)
                 } else {
                     print("WEB FLOW keep main frame for recoverable status=\(status)")
+                    DebugLogStore.shared.append("WEB keep main frame for recoverable status=\(status)")
                 }
             } else if status >= 400, webView === popupWebView {
+                DebugLogStore.shared.append("WEB popup response status=\(status), close popup")
                 closePopupIfNeeded(webView)
             }
         }
@@ -1057,6 +1126,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
         }
         if shouldSuppressRecoverableWebError(nsError) {
             print("WEB FLOW \(stage) suppressed recoverable error domain=\(nsError.domain) code=\(nsError.code)")
+            DebugLogStore.shared.append("WEB \(stage) suppressed recoverable error domain=\(nsError.domain) code=\(nsError.code)")
             return
         }
         if handleUnsupportedURLIfNeeded(nsError, webView: webView, stage: stage) {
@@ -1080,6 +1150,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
                 return true
             }
             print("WEB FLOW \(stage) telegram rewrite from=\(failedURL.absoluteString) to=\(rewrittenURL.absoluteString)")
+            DebugLogStore.shared.append("WEB \(stage) telegram rewrite from=\(failedURL.absoluteString) to=\(rewrittenURL.absoluteString)")
             if webView === self.webView {
                 loadMainURL(rewrittenURL, reason: "telegram-rewrite-\(stage)", resetRetries: false)
             } else {
@@ -1095,10 +1166,12 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
                 UIApplication.shared.open(failedURL, options: [:], completionHandler: nil)
             }
             print("WEB FLOW \(stage) opened external unsupported url=\(failedURL.absoluteString)")
+            DebugLogStore.shared.append("WEB \(stage) opened external unsupported url=\(failedURL.absoluteString)")
             return true
         }
 
         print("WEB FLOW \(stage) suppressed unsupported URL")
+        DebugLogStore.shared.append("WEB \(stage) suppressed unsupported URL")
         return true
     }
 
@@ -1220,6 +1293,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
         let attempt = mainLoadRetryCount
         let delaySeconds = Double(attempt)
         print("WEB FLOW \(stage) retry attempt=\(attempt)/\(maxMainLoadRetries) url=\(mainURL.absoluteString)")
+        DebugLogStore.shared.append("WEB \(stage) retry attempt=\(attempt)/\(maxMainLoadRetries) url=\(mainURL.absoluteString)")
         DispatchQueue.main.asyncAfter(deadline: .now() + delaySeconds) { [weak self] in
             guard let self, !self.didTriggerFallback else { return }
             self.loadMainURL(mainURL, reason: "retry-\(attempt)-\(stage)", resetRetries: false)
@@ -1247,6 +1321,7 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
         }
         guard !didTriggerFallback else { return }
         didTriggerFallback = true
+        DebugLogStore.shared.append("WEB trigger fallback reason=\(reason)")
         NotificationCenter.default.post(
             name: .webFlowShouldShowFallback,
             object: nil,
