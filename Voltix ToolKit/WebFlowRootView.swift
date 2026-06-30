@@ -14,6 +14,7 @@ private enum WebBootstrapPhase: Equatable {
 private extension Notification.Name {
     static let webFlowShouldShowFallback = Notification.Name("webFlowShouldShowFallback")
     static let debugLogsRequested = Notification.Name("debugLogsRequested")
+    static let debugLogsUpdated = Notification.Name("debugLogsUpdated")
 }
 
 private enum WebFlowFallback {
@@ -38,12 +39,14 @@ final class DebugLogStore: ObservableObject {
             if self.lines.count > 500 {
                 self.lines.removeFirst(self.lines.count - 500)
             }
+            NotificationCenter.default.post(name: .debugLogsUpdated, object: nil)
         }
     }
 
     func clear() {
         DispatchQueue.main.async {
             self.lines.removeAll()
+            NotificationCenter.default.post(name: .debugLogsUpdated, object: nil)
         }
     }
 
@@ -640,10 +643,6 @@ private struct WebFlowResponse: Codable {
 struct RootContentView: View {
     @StateObject private var webBootstrapViewModel = WebBootstrapViewModel()
     @State private var didStartBootstrap = false
-#if DEBUG
-    @ObservedObject private var debugLogStore = DebugLogStore.shared
-    @State private var showDebugLogs = false
-#endif
 
     private let tokenReceivedPublisher = NotificationCenter.default.publisher(
         for: NSNotification.Name("tokenReceivedPublisher")
@@ -652,11 +651,6 @@ struct RootContentView: View {
     private let webFlowFailedPublisher = NotificationCenter.default.publisher(
         for: .webFlowShouldShowFallback
     )
-#if DEBUG
-    private let debugLogsRequestedPublisher = NotificationCenter.default.publisher(
-        for: .debugLogsRequested
-    )
-#endif
 
     var body: some View {
         ZStack {
@@ -666,37 +660,7 @@ struct RootContentView: View {
                 WebFlowScreen(taskLink: taskLink)
                     .ignoresSafeArea()
             }
-#if DEBUG
-            if case .web = webBootstrapViewModel.phase, !showDebugLogs {
-                VStack {
-                    HStack {
-                        Spacer()
-                        Button("DBG") {
-                            showDebugLogs = true
-                        }
-                        .font(.system(size: 12, weight: .bold, design: .monospaced))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 8)
-                        .background(Color.black.opacity(0.72))
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                    }
-                    Spacer()
-                }
-                .padding(.top, 12)
-                .padding(.trailing, 12)
-                .zIndex(10)
-            }
-
-            if showDebugLogs {
-                DebugLogOverlay(store: debugLogStore, isPresented: $showDebugLogs)
-                    .zIndex(20)
-            }
-#endif
         }
-#if DEBUG
-        .background(ShakeDetectorView())
-#endif
         .onAppear {
             guard !didStartBootstrap else { return }
             didStartBootstrap = true
@@ -712,88 +676,8 @@ struct RootContentView: View {
             DebugLogStore.shared.append("Web flow fallback requested reason=\(reason)")
             webBootstrapViewModel.handleWebFlowFailure(reason: reason)
         }
-#if DEBUG
-        .onReceive(debugLogsRequestedPublisher) { _ in
-            showDebugLogs = true
-        }
-#endif
     }
 }
-
-#if DEBUG
-private struct ShakeDetectorView: UIViewControllerRepresentable {
-    func makeUIViewController(context: Context) -> ShakeDetectorViewController {
-        ShakeDetectorViewController()
-    }
-
-    func updateUIViewController(_ uiViewController: ShakeDetectorViewController, context: Context) {
-    }
-}
-
-private final class ShakeDetectorViewController: UIViewController {
-    override var canBecomeFirstResponder: Bool {
-        true
-    }
-
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        becomeFirstResponder()
-    }
-
-    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
-        guard motion == .motionShake else { return }
-        DebugLogStore.shared.append("Shake detected, opening debug overlay")
-        NotificationCenter.default.post(name: .debugLogsRequested, object: nil)
-    }
-}
-
-private struct DebugLogOverlay: View {
-    @ObservedObject var store: DebugLogStore
-    @Binding var isPresented: Bool
-
-    var body: some View {
-        ZStack {
-            Color.black.opacity(0.32)
-                .ignoresSafeArea()
-
-            VStack(spacing: 0) {
-                HStack(spacing: 8) {
-                    Text("Debug")
-                        .font(.system(size: 15, weight: .semibold))
-                    Spacer()
-                    Button("Copy") {
-                        UIPasteboard.general.string = store.text
-                    }
-                    Button("Clear") {
-                        store.clear()
-                    }
-                    Button("Close") {
-                        isPresented = false
-                    }
-                }
-                .buttonStyle(.bordered)
-                .padding(10)
-
-                Divider()
-
-                ScrollView {
-                    Text(store.text.isEmpty ? "No logs yet" : store.text)
-                        .font(.system(size: 10, weight: .regular, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(10)
-                }
-                .background(Color(.systemBackground))
-            }
-            .background(Color(.systemBackground))
-            .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-            .shadow(color: .black.opacity(0.24), radius: 18, x: 0, y: 8)
-            .padding(.horizontal, 10)
-            .padding(.vertical, 48)
-        }
-    }
-}
-#endif
 
 private struct WebFlowScreen: UIViewControllerRepresentable {
     let taskLink: String
@@ -823,6 +707,20 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
     private let maxMainLoadRetries = 2
     private var contentProcessTerminateRetryCount = 0
     private let maxContentProcessTerminateRetries = 2
+#if DEBUG
+    private var debugButton: UIButton?
+    private var debugOverlay: UIView?
+    private var debugTextView: UITextView?
+    private var debugLogsObserver: NSObjectProtocol?
+#endif
+
+    deinit {
+#if DEBUG
+        if let debugLogsObserver {
+            NotificationCenter.default.removeObserver(debugLogsObserver)
+        }
+#endif
+    }
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -832,7 +730,20 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
         setNeedsUpdateOfSupportedInterfaceOrientations()
         navigationController?.setNeedsUpdateOfSupportedInterfaceOrientations()
         configureMainWebView()
+#if DEBUG
+        configureDebugControls()
+#endif
         loadIfNeeded()
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+#if DEBUG
+        if let debugButton {
+            view.bringSubviewToFront(debugButton)
+        }
+#endif
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -855,6 +766,18 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
 
     override var supportedInterfaceOrientations: UIInterfaceOrientationMask {
         .allButUpsideDown
+    }
+
+    override var canBecomeFirstResponder: Bool {
+        true
+    }
+
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return }
+#if DEBUG
+        DebugLogStore.shared.append("Shake detected in WebFlowViewController, opening debug overlay")
+        showDebugOverlay()
+#endif
     }
 
     func loadIfNeeded() {
@@ -907,6 +830,155 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
 
         webView = createdWebView
     }
+
+#if DEBUG
+    private func configureDebugControls() {
+        let button = UIButton(type: .system)
+        button.setTitle("DBG", for: .normal)
+        button.setTitleColor(.white, for: .normal)
+        button.titleLabel?.font = .monospacedSystemFont(ofSize: 12, weight: .bold)
+        button.backgroundColor = UIColor.black.withAlphaComponent(0.76)
+        button.layer.cornerRadius = 8
+        button.layer.masksToBounds = true
+        button.addTarget(self, action: #selector(showDebugOverlay), for: .touchUpInside)
+        button.translatesAutoresizingMaskIntoConstraints = false
+
+        view.addSubview(button)
+        NSLayoutConstraint.activate([
+            button.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -12),
+            button.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            button.widthAnchor.constraint(equalToConstant: 54),
+            button.heightAnchor.constraint(equalToConstant: 36)
+        ])
+        debugButton = button
+
+        debugLogsObserver = NotificationCenter.default.addObserver(
+            forName: .debugLogsUpdated,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.refreshDebugText()
+        }
+    }
+
+    @objc private func showDebugOverlay() {
+        if debugOverlay != nil {
+            refreshDebugText()
+            return
+        }
+
+        let overlay = UIView()
+        overlay.backgroundColor = UIColor.black.withAlphaComponent(0.32)
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+
+        let panel = UIView()
+        panel.backgroundColor = .systemBackground
+        panel.layer.cornerRadius = 8
+        panel.layer.shadowColor = UIColor.black.cgColor
+        panel.layer.shadowOpacity = 0.24
+        panel.layer.shadowRadius = 18
+        panel.layer.shadowOffset = CGSize(width: 0, height: 8)
+        panel.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = UILabel()
+        title.text = "Debug"
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let copyButton = makeDebugToolbarButton(title: "Copy", action: #selector(copyDebugLogs))
+        let clearButton = makeDebugToolbarButton(title: "Clear", action: #selector(clearDebugLogs))
+        let closeButton = makeDebugToolbarButton(title: "Close", action: #selector(hideDebugOverlay))
+
+        let toolbar = UIStackView(arrangedSubviews: [title, copyButton, clearButton, closeButton])
+        toolbar.axis = .horizontal
+        toolbar.alignment = .center
+        toolbar.spacing = 8
+        toolbar.translatesAutoresizingMaskIntoConstraints = false
+
+        let divider = UIView()
+        divider.backgroundColor = .separator
+        divider.translatesAutoresizingMaskIntoConstraints = false
+
+        let textView = UITextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.alwaysBounceVertical = true
+        textView.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
+        textView.backgroundColor = .systemBackground
+        textView.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
+        textView.translatesAutoresizingMaskIntoConstraints = false
+
+        view.addSubview(overlay)
+        overlay.addSubview(panel)
+        panel.addSubview(toolbar)
+        panel.addSubview(divider)
+        panel.addSubview(textView)
+
+        NSLayoutConstraint.activate([
+            overlay.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            overlay.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            overlay.topAnchor.constraint(equalTo: view.topAnchor),
+            overlay.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+            panel.leadingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.leadingAnchor, constant: 10),
+            panel.trailingAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.trailingAnchor, constant: -10),
+            panel.topAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.topAnchor, constant: 48),
+            panel.bottomAnchor.constraint(equalTo: overlay.safeAreaLayoutGuide.bottomAnchor, constant: -48),
+
+            toolbar.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            toolbar.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -10),
+            toolbar.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
+            toolbar.heightAnchor.constraint(equalToConstant: 34),
+
+            divider.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            divider.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            divider.topAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: 10),
+            divider.heightAnchor.constraint(equalToConstant: 1 / UIScreen.main.scale),
+
+            textView.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            textView.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            textView.topAnchor.constraint(equalTo: divider.bottomAnchor),
+            textView.bottomAnchor.constraint(equalTo: panel.bottomAnchor)
+        ])
+
+        debugOverlay = overlay
+        debugTextView = textView
+        refreshDebugText()
+        view.bringSubviewToFront(overlay)
+    }
+
+    private func makeDebugToolbarButton(title: String, action: Selector) -> UIButton {
+        let button = UIButton(type: .system)
+        button.setTitle(title, for: .normal)
+        button.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        button.addTarget(self, action: action, for: .touchUpInside)
+        return button
+    }
+
+    private func refreshDebugText() {
+        guard let debugTextView else { return }
+        debugTextView.text = DebugLogStore.shared.text.isEmpty ? "No logs yet" : DebugLogStore.shared.text
+        let bottom = NSRange(location: max(debugTextView.text.count - 1, 0), length: 1)
+        debugTextView.scrollRangeToVisible(bottom)
+    }
+
+    @objc private func copyDebugLogs() {
+        UIPasteboard.general.string = DebugLogStore.shared.text
+    }
+
+    @objc private func clearDebugLogs() {
+        DebugLogStore.shared.clear()
+    }
+
+    @objc private func hideDebugOverlay() {
+        debugOverlay?.removeFromSuperview()
+        debugOverlay = nil
+        debugTextView = nil
+        if let debugButton {
+            view.bringSubviewToFront(debugButton)
+        }
+    }
+#endif
 
     private func loadMainURL(_ url: URL, reason: String, resetRetries: Bool) {
         guard let webView else { return }
@@ -1108,6 +1180,11 @@ private final class WebFlowViewController: UIViewController, WKNavigationDelegat
             createdPopup.topAnchor.constraint(equalTo: view.topAnchor),
             createdPopup.bottomAnchor.constraint(equalTo: view.bottomAnchor)
         ])
+#if DEBUG
+        if let debugButton {
+            view.bringSubviewToFront(debugButton)
+        }
+#endif
 
         return createdPopup
     }
