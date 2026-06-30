@@ -9,9 +9,9 @@
 /* Begin PBXBuildFile section */
 		868CBA5E2FF26A5100E5F9A4 /* AdjustSdk in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA5D2FF26A5100E5F9A4 /* AdjustSdk */; };
 		868CBA602FF26A5100E5F9A4 /* AdjustWebBridge in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA5F2FF26A5100E5F9A4 /* AdjustWebBridge */; };
-		868CBA6A2FF26B5100E5F9A4 /* AdjustGoogleOdm in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */; };
 		868CBA662FF26B5100E5F9A4 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA652FF26B5100E5F9A4 /* FirebaseCore */; };
 		868CBA682FF26B5100E5F9A4 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA672FF26B5100E5F9A4 /* FirebaseMessaging */; };
+		868CBA6A2FF26B5100E5F9A4 /* AdjustGoogleOdm in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -291,7 +291,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.app.VoltixToolKit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -329,7 +329,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.2;
+				MARKETING_VERSION = 1.3;
 				PRODUCT_BUNDLE_IDENTIFIER = com.app.VoltixToolKit;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -395,11 +395,6 @@
 			package = 868CBA5C2FF26A5100E5F9A4 /* XCRemoteSwiftPackageReference "ios_sdk" */;
 			productName = AdjustWebBridge;
 		};
-		868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = 868CBA5C2FF26A5100E5F9A4 /* XCRemoteSwiftPackageReference "ios_sdk" */;
-			productName = AdjustGoogleOdm;
-		};
 		868CBA652FF26B5100E5F9A4 /* FirebaseCore */ = {
 			isa = XCSwiftPackageProductDependency;
 			package = 868CBA612FF26A6300E5F9A4 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
@@ -409,6 +404,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 868CBA612FF26A6300E5F9A4 /* XCRemoteSwiftPackageReference "firebase-ios-sdk" */;
 			productName = FirebaseMessaging;
+		};
+		868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 868CBA5C2FF26A5100E5F9A4 /* XCRemoteSwiftPackageReference "ios_sdk" */;
+			productName = AdjustGoogleOdm;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};
