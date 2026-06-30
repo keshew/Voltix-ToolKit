@@ -56,6 +56,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
 
         let adjustConfig = ADJConfig(appToken: adjustAppToken, environment: adjustEnvironment)
         adjustConfig?.delegate = adjustAttributionHandler
+        adjustConfig?.attConsentWaitingInterval = 13
         Adjust.initSdk(adjustConfig)
 
         if let userInfo = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {

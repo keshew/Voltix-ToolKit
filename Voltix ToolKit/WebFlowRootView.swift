@@ -86,7 +86,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         await requestPushPermissionAndRegister()
         try? await Task.sleep(nanoseconds: 500_000_000)
         await requestATTAndStoreIDFA()
-        await waitForFCMToken(upToSeconds: 8)
+        await waitForFCMToken(upToSeconds: 5)
         print("WEB FLOW bootstrap trigger=\(trigger)")
 
         if let cachedTaskLink = normalizeURLString(UserDefaults.standard.string(forKey: "taskLink")),
@@ -137,9 +137,8 @@ private final class WebBootstrapViewModel: ObservableObject {
         var request = URLRequest(url: controlsURL)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(resolvedClientUUID(), forHTTPHeaderField: "client-uuid")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        let adjustAttribution = await waitForAdjustAttribution(upToSeconds: 12)
+        let adjustAttribution = await waitForAdjustAttribution(upToSeconds: 13)
         let requestBody: [String: Any] = [
             "adjust": adjustAttribution,
             "referrer": referrer
@@ -237,19 +236,32 @@ private final class WebBootstrapViewModel: ObservableObject {
     }
 
     private func waitForAdjustAttribution(upToSeconds seconds: Int) async -> [String: Any] {
-        for _ in 0..<seconds {
-            if let jsonDictionary = storedAdjustAttributionDictionary(),
-               attributionHasCampaignSignal(jsonDictionary) {
-                return normalizedAdjustAttribution(from: jsonDictionary)
+        if let sdkAttribution = await adjustAttributionFromSDK(timeoutMilliseconds: seconds * 1_000) {
+            let normalizedAttribution = normalizedAdjustAttribution(from: sdkAttribution)
+            if attributionHasCampaignSignal(normalizedAttribution) {
+                UserDefaults.standard.set(normalizedAttribution["jsonResponse"] as? String ?? "", forKey: "lastAdjustAttribution")
+                return normalizedAttribution
             }
-            try? await Task.sleep(nanoseconds: 1_000_000_000)
+            print("WEB FLOW Adjust attribution without campaign signal:", normalizedAttribution)
         }
 
-        guard let jsonDictionary = storedAdjustAttributionDictionary() else {
-            return [:]
+        if let jsonDictionary = storedAdjustAttributionDictionary() {
+            let normalizedAttribution = normalizedAdjustAttribution(from: jsonDictionary)
+            if attributionHasCampaignSignal(normalizedAttribution) {
+                return normalizedAttribution
+            }
+            print("WEB FLOW stored Adjust attribution without campaign signal:", normalizedAttribution)
         }
 
-        return normalizedAdjustAttribution(from: jsonDictionary)
+        return [:]
+    }
+
+    private func adjustAttributionFromSDK(timeoutMilliseconds: Int) async -> ADJAttribution? {
+        await withCheckedContinuation { continuation in
+            Adjust.attribution(withTimeout: timeoutMilliseconds) { attribution in
+                continuation.resume(returning: attribution)
+            }
+        }
     }
 
     private func storedAdjustAttributionDictionary() -> [String: Any]? {
@@ -261,6 +273,31 @@ private final class WebBootstrapViewModel: ObservableObject {
         }
 
         return jsonDictionary
+    }
+
+    private func normalizedAdjustAttribution(from attribution: ADJAttribution) -> [String: Any] {
+        let jsonResponse = attribution.jsonResponse as? [String: Any] ?? attribution.dictionary() as? [String: Any] ?? [:]
+        let jsonString: String
+        if let data = try? JSONSerialization.data(withJSONObject: jsonResponse, options: []),
+           let encoded = String(data: data, encoding: .utf8) {
+            jsonString = encoded
+        } else {
+            jsonString = ""
+        }
+
+        return [
+            "trackerToken": attribution.trackerToken ?? "",
+            "trackerName": attribution.trackerName ?? "",
+            "network": attribution.network ?? "",
+            "campaign": attribution.campaign ?? "",
+            "adgroup": attribution.adgroup ?? "",
+            "creative": attribution.creative ?? "",
+            "clickLabel": attribution.clickLabel ?? "",
+            "costType": attribution.costType ?? "",
+            "costAmount": attribution.costAmount?.doubleValue ?? 0,
+            "costCurrency": attribution.costCurrency ?? "",
+            "jsonResponse": jsonString
+        ]
     }
 
     private func normalizedAdjustAttribution(from jsonDictionary: [String: Any]) -> [String: Any] {
@@ -297,7 +334,6 @@ private final class WebBootstrapViewModel: ObservableObject {
         if !text("adgroup").isEmpty { return true }
         if !text("creative").isEmpty { return true }
         if !text("clickLabel").isEmpty { return true }
-        if !text("trackerToken").isEmpty { return true }
 
         let network = text("network").lowercased()
         if !network.isEmpty, network != "organic" {
@@ -332,33 +368,26 @@ private final class WebBootstrapViewModel: ObservableObject {
     }
 
     private func fetchServiceLink() async -> String? {
-        let endpoints = [
-            bootstrapEndpoint,
-            "\(bootstrapEndpoint)?action=check_info"
-        ]
+        guard let url = URL(string: "\(bootstrapEndpoint)?action=check_info") else {
+            return nil
+        }
 
-        for clientUUID in clientUUIDCandidates() {
-            for endpoint in endpoints {
-                guard let url = URL(string: endpoint) else { continue }
+        let clientUUID = normalizedNonLegacyClientUUID(UserDefaults.standard.string(forKey: "userId")) ?? "1"
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
+        request.setValue(clientUUID, forHTTPHeaderField: "client-uuid")
 
-                var request = URLRequest(url: url)
-                request.httpMethod = "GET"
-                request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-                request.setValue(clientUUID, forHTTPHeaderField: "client-uuid")
-                request.setValue("application/json", forHTTPHeaderField: "Accept")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
 
-                do {
-                    let (data, response) = try await URLSession.shared.data(for: request)
-
-                    guard let httpResponse = response as? HTTPURLResponse else { continue }
-                    if let serviceLink = extractServiceLink(from: httpResponse, bodyData: data) {
-                        rememberWorkingClientUUID(clientUUID)
-                        return serviceLink
-                    }
-                } catch {
-                    print("WEB FLOW fetchServiceLink endpoint=\(endpoint) error=\(error.localizedDescription)")
-                }
+            guard let httpResponse = response as? HTTPURLResponse else { return nil }
+            if let serviceLink = extractServiceLink(from: httpResponse, bodyData: data) {
+                rememberWorkingClientUUID(clientUUID)
+                return serviceLink
             }
+        } catch {
+            print("WEB FLOW fetchServiceLink error=\(error.localizedDescription)")
         }
 
         return nil
