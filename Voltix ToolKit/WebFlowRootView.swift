@@ -12,10 +12,43 @@ private enum WebBootstrapPhase: Equatable {
 
 private extension Notification.Name {
     static let webFlowShouldShowFallback = Notification.Name("webFlowShouldShowFallback")
+    static let debugLogsRequested = Notification.Name("debugLogsRequested")
 }
 
 private enum WebFlowFallback {
     static let reasonKey = "reason"
+}
+
+final class DebugLogStore: ObservableObject {
+    static let shared = DebugLogStore()
+
+    @Published private(set) var lines: [String] = []
+
+    private let formatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter
+    }()
+
+    func append(_ message: String) {
+        DispatchQueue.main.async {
+            let timestamp = self.formatter.string(from: Date())
+            self.lines.append("[\(timestamp)] \(message)")
+            if self.lines.count > 400 {
+                self.lines.removeFirst(self.lines.count - 400)
+            }
+        }
+    }
+
+    func clear() {
+        DispatchQueue.main.async {
+            self.lines.removeAll()
+        }
+    }
+
+    var text: String {
+        lines.joined(separator: "\n")
+    }
 }
 
 private final class WebBootstrapViewModel: ObservableObject {
@@ -83,6 +116,7 @@ private final class WebBootstrapViewModel: ObservableObject {
     }
 
     private func bootstrap(trigger: String) async {
+        DebugLogStore.shared.append("Bootstrap start trigger=\(trigger)")
         await requestPushPermissionAndRegister()
         try? await Task.sleep(nanoseconds: 500_000_000)
         await requestATTAndStoreIDFA()
@@ -91,20 +125,25 @@ private final class WebBootstrapViewModel: ObservableObject {
 
         if let cachedTaskLink = normalizeURLString(UserDefaults.standard.string(forKey: "taskLink")),
            trigger == "start" {
+            DebugLogStore.shared.append("Cached taskLink exists: \(cachedTaskLink)")
             await MainActor.run { self.phase = .web(cachedTaskLink) }
         }
 
         if normalizeURLString(UserDefaults.standard.string(forKey: "controlsLink")) == nil {
+            DebugLogStore.shared.append("controlsLink missing, fetching service-link")
             await configureControlsLink()
         }
 
         guard let controlsLinkString = normalizeURLString(UserDefaults.standard.string(forKey: "controlsLink")) else {
+            DebugLogStore.shared.append("controlsLink is still missing, fallback native")
             await MainActor.run { self.phase = .native }
             return
         }
+        DebugLogStore.shared.append("controlsLink=\(controlsLinkString)")
 
         let fcmToken = UserDefaults.standard.string(forKey: "fcmToken") ?? "null"
         print("WEB FLOW bootstrap fcmToken trigger=\(trigger) value=\(fcmToken)")
+        DebugLogStore.shared.append("FCM token=\(fcmToken)")
 
         let storedClientID = (UserDefaults.standard.string(forKey: "client_id") ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -112,6 +151,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         let adjustID = await Adjust.adid() ?? ""
         let idfa = UserDefaults.standard.string(forKey: "idfa") ?? ""
         let deviceModel = await MainActor.run { UIDevice.current.model }
+        DebugLogStore.shared.append("IDs client_id=\(storedClientID) push_id=\(pushID) adjust_id=\(adjustID) idfa=\(idfa) device=\(deviceModel)")
 
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "firebase_push_token", value: fcmToken),
@@ -130,6 +170,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         components?.queryItems = queryItems
 
         guard let controlsURL = components?.url else {
+            DebugLogStore.shared.append("Failed to build controls URL from \(controlsLinkString)")
             await MainActor.run { self.phase = .native }
             return
         }
@@ -143,21 +184,29 @@ private final class WebBootstrapViewModel: ObservableObject {
             "adjust": adjustAttribution,
             "referrer": referrer
         ]
+        DebugLogStore.shared.append("POST url=\(controlsURL.absoluteString)")
+        DebugLogStore.shared.append("POST body=\(jsonString(from: requestBody))")
         request.httpBody = (try? JSONSerialization.data(withJSONObject: requestBody, options: [])) ?? Data("{}".utf8)
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             if let httpResponse = response as? HTTPURLResponse, !(200...299).contains(httpResponse.statusCode) {
                 print("WEB FLOW bootstrap bad status=\(httpResponse.statusCode)")
+                DebugLogStore.shared.append("POST response bad status=\(httpResponse.statusCode) body=\(String(data: data, encoding: .utf8) ?? "")")
                 await MainActor.run { self.phase = .native }
                 return
+            }
+            if let httpResponse = response as? HTTPURLResponse {
+                DebugLogStore.shared.append("POST response status=\(httpResponse.statusCode) body=\(String(data: data, encoding: .utf8) ?? "")")
             }
 
             let decoded = try JSONDecoder().decode(WebFlowResponse.self, from: data)
             UserDefaults.standard.set(decoded.clientID, forKey: "client_id")
+            DebugLogStore.shared.append("Decoded response client_id=\(decoded.clientID) response=\(decoded.response ?? "nil")")
 
             if let taskLink = normalizeURLString(decoded.response) {
                 UserDefaults.standard.set(taskLink, forKey: "taskLink")
+                DebugLogStore.shared.append("Opening taskLink=\(taskLink)")
                 if !pushID.isEmpty {
                     await MainActor.run { self.lastHandledPushIDThisLaunch = pushID }
                 }
@@ -167,10 +216,12 @@ private final class WebBootstrapViewModel: ObservableObject {
                 await MainActor.run { self.hasCreatedSessionThisLaunch = true }
                 await MainActor.run { self.phase = .web(taskLink) }
             } else {
+                DebugLogStore.shared.append("Decoded response has no valid taskLink, fallback native")
                 await MainActor.run { self.phase = .native }
             }
         } catch {
             print("WEB FLOW bootstrap error=\(error.localizedDescription)")
+            DebugLogStore.shared.append("POST error=\(error.localizedDescription)")
             await MainActor.run { self.phase = .native }
         }
     }
@@ -184,12 +235,15 @@ private final class WebBootstrapViewModel: ObservableObject {
 
         if settings.authorizationStatus == .notDetermined {
             do {
-                _ = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+                let granted = try await center.requestAuthorization(options: [.alert, .badge, .sound])
+                DebugLogStore.shared.append("Push permission requested granted=\(granted)")
             } catch {
+                DebugLogStore.shared.append("Push permission error=\(error.localizedDescription)")
             }
         }
 
         UIApplication.shared.registerForRemoteNotifications()
+        DebugLogStore.shared.append("Registered for remote notifications")
     }
 
     private func waitForFCMToken(upToSeconds seconds: Int) async {
@@ -197,10 +251,12 @@ private final class WebBootstrapViewModel: ObservableObject {
             let token = (UserDefaults.standard.string(forKey: "fcmToken") ?? "")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             if !token.isEmpty, token != "null" {
+                DebugLogStore.shared.append("FCM token ready after wait: \(token)")
                 return
             }
             try? await Task.sleep(nanoseconds: 250_000_000)
         }
+        DebugLogStore.shared.append("FCM token wait timed out")
     }
 
     @MainActor
@@ -208,6 +264,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         guard #available(iOS 14.5, *) else {
             let idfa = ASIdentifierManager.shared().advertisingIdentifier.uuidString
             UserDefaults.standard.set(idfa, forKey: "idfa")
+            DebugLogStore.shared.append("ATT unavailable, IDFA=\(idfa)")
             return
         }
 
@@ -217,6 +274,7 @@ private final class WebBootstrapViewModel: ObservableObject {
                 ? ASIdentifierManager.shared().advertisingIdentifier.uuidString
                 : ""
             UserDefaults.standard.set(idfa, forKey: "idfa")
+            DebugLogStore.shared.append("ATT already decided status=\(currentStatus.rawValue) IDFA=\(idfa)")
             return
         }
 
@@ -225,6 +283,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         }
 
         guard UIApplication.shared.applicationState == .active else {
+            DebugLogStore.shared.append("ATT request skipped: app is not active")
             return
         }
 
@@ -233,11 +292,14 @@ private final class WebBootstrapViewModel: ObservableObject {
             ? ASIdentifierManager.shared().advertisingIdentifier.uuidString
             : ""
         UserDefaults.standard.set(idfa, forKey: "idfa")
+        DebugLogStore.shared.append("ATT requested via Adjust status=\(status) IDFA=\(idfa)")
     }
 
     private func waitForAdjustAttribution(upToSeconds seconds: Int) async -> [String: Any] {
+        DebugLogStore.shared.append("Waiting Adjust attribution via SDK timeout=\(seconds)s")
         if let sdkAttribution = await adjustAttributionFromSDK(timeoutMilliseconds: seconds * 1_000) {
             let normalizedAttribution = normalizedAdjustAttribution(from: sdkAttribution)
+            DebugLogStore.shared.append("Adjust SDK attribution=\(jsonString(from: normalizedAttribution))")
             if attributionHasCampaignSignal(normalizedAttribution) {
                 UserDefaults.standard.set(normalizedAttribution["jsonResponse"] as? String ?? "", forKey: "lastAdjustAttribution")
                 return normalizedAttribution
@@ -247,12 +309,14 @@ private final class WebBootstrapViewModel: ObservableObject {
 
         if let jsonDictionary = storedAdjustAttributionDictionary() {
             let normalizedAttribution = normalizedAdjustAttribution(from: jsonDictionary)
+            DebugLogStore.shared.append("Stored Adjust attribution=\(jsonString(from: normalizedAttribution))")
             if attributionHasCampaignSignal(normalizedAttribution) {
                 return normalizedAttribution
             }
             print("WEB FLOW stored Adjust attribution without campaign signal:", normalizedAttribution)
         }
 
+        DebugLogStore.shared.append("No Adjust attribution with campaign signal, sending empty adjust")
         return [:]
     }
 
@@ -377,17 +441,21 @@ private final class WebBootstrapViewModel: ObservableObject {
         request.httpMethod = "POST"
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
         request.setValue(clientUUID, forHTTPHeaderField: "client-uuid")
+        DebugLogStore.shared.append("service-link request url=\(url.absoluteString) client-uuid=\(clientUUID)")
 
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
 
             guard let httpResponse = response as? HTTPURLResponse else { return nil }
+            DebugLogStore.shared.append("service-link response status=\(httpResponse.statusCode) headers=\(httpResponse.allHeaderFields) body=\(String(data: data, encoding: .utf8) ?? "")")
             if let serviceLink = extractServiceLink(from: httpResponse, bodyData: data) {
                 rememberWorkingClientUUID(clientUUID)
+                DebugLogStore.shared.append("service-link extracted=\(serviceLink)")
                 return serviceLink
             }
         } catch {
             print("WEB FLOW fetchServiceLink error=\(error.localizedDescription)")
+            DebugLogStore.shared.append("service-link error=\(error.localizedDescription)")
         }
 
         return nil
@@ -437,6 +505,16 @@ private final class WebBootstrapViewModel: ObservableObject {
         let value = UUID().uuidString
         UserDefaults.standard.set(value, forKey: generatedClientUUIDKey)
         return value
+    }
+
+    private func jsonString(from object: Any) -> String {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]),
+              let text = String(data: data, encoding: .utf8) else {
+            return String(describing: object)
+        }
+
+        return text
     }
 
     private func normalizedNonLegacyClientUUID(_ raw: String?) -> String? {
@@ -554,7 +632,9 @@ private struct WebFlowResponse: Codable {
 
 struct RootContentView: View {
     @StateObject private var webBootstrapViewModel = WebBootstrapViewModel()
+    @ObservedObject private var debugLogStore = DebugLogStore.shared
     @State private var didStartBootstrap = false
+    @State private var showDebugLogs = false
 
     private let tokenReceivedPublisher = NotificationCenter.default.publisher(
         for: NSNotification.Name("tokenReceivedPublisher")
@@ -562,6 +642,10 @@ struct RootContentView: View {
 
     private let webFlowFailedPublisher = NotificationCenter.default.publisher(
         for: .webFlowShouldShowFallback
+    )
+
+    private let debugLogsRequestedPublisher = NotificationCenter.default.publisher(
+        for: .debugLogsRequested
     )
 
     var body: some View {
@@ -573,17 +657,84 @@ struct RootContentView: View {
                     .ignoresSafeArea()
             }
         }
+        .background(ShakeDetectorView())
         .onAppear {
             guard !didStartBootstrap else { return }
             didStartBootstrap = true
+            DebugLogStore.shared.append("RootContentView appeared, starting bootstrap")
             webBootstrapViewModel.start()
         }
         .onReceive(tokenReceivedPublisher) { _ in
+            DebugLogStore.shared.append("Notification tokenReceivedPublisher")
             webBootstrapViewModel.handlePushOrTokenUpdate(trigger: "tokenReceived")
         }
         .onReceive(webFlowFailedPublisher) { note in
             let reason = note.userInfo?[WebFlowFallback.reasonKey] as? String ?? "unknown"
+            DebugLogStore.shared.append("Web flow fallback requested reason=\(reason)")
             webBootstrapViewModel.handleWebFlowFailure(reason: reason)
+        }
+        .onReceive(debugLogsRequestedPublisher) { _ in
+            showDebugLogs = true
+        }
+        .sheet(isPresented: $showDebugLogs) {
+            DebugLogView(store: debugLogStore)
+        }
+    }
+}
+
+private struct ShakeDetectorView: UIViewControllerRepresentable {
+    func makeUIViewController(context: Context) -> ShakeDetectorViewController {
+        ShakeDetectorViewController()
+    }
+
+    func updateUIViewController(_ uiViewController: ShakeDetectorViewController, context: Context) {
+    }
+}
+
+private final class ShakeDetectorViewController: UIViewController {
+    override var canBecomeFirstResponder: Bool {
+        true
+    }
+
+    override func viewDidAppear(_ animated: Bool) {
+        super.viewDidAppear(animated)
+        becomeFirstResponder()
+    }
+
+    override func motionEnded(_ motion: UIEvent.EventSubtype, with event: UIEvent?) {
+        guard motion == .motionShake else { return }
+        DebugLogStore.shared.append("Shake detected, opening debug logs")
+        NotificationCenter.default.post(name: .debugLogsRequested, object: nil)
+    }
+}
+
+private struct DebugLogView: View {
+    @ObservedObject var store: DebugLogStore
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                Text(store.text.isEmpty ? "No logs yet" : store.text)
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+            }
+            .navigationTitle("Debug Logs")
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("Clear") {
+                        store.clear()
+                    }
+                }
+
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Close") {
+                        dismiss()
+                    }
+                }
+            }
         }
     }
 }

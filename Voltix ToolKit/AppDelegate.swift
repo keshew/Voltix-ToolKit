@@ -16,6 +16,7 @@ final class AdjustAttributionHandler: NSObject, AdjustDelegate {
         if #available(iOS 14, *),
            ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
             print("Adjust attribution received before ATT decision, skipping save for now")
+            DebugLogStore.shared.append("Adjust callback skipped: ATT status is notDetermined")
             return
         }
 
@@ -24,11 +25,13 @@ final class AdjustAttributionHandler: NSObject, AdjustDelegate {
               let jsonString = String(data: data, encoding: .utf8) else {
             UserDefaults.standard.removeObject(forKey: "lastAdjustAttribution")
             print("Adjust attribution jsonResponse is empty")
+            DebugLogStore.shared.append("Adjust callback jsonResponse is empty")
             return
         }
 
         UserDefaults.standard.set(jsonString, forKey: "lastAdjustAttribution")
         print("Adjust attribution saved:", jsonString)
+        DebugLogStore.shared.append("Adjust callback saved: \(jsonString)")
     }
 }
 
@@ -57,6 +60,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let adjustConfig = ADJConfig(appToken: adjustAppToken, environment: adjustEnvironment)
         adjustConfig?.delegate = adjustAttributionHandler
         adjustConfig?.attConsentWaitingInterval = 13
+        DebugLogStore.shared.append("Adjust init token=\(adjustAppToken) env=\(adjustEnvironment) attWait=13")
         Adjust.initSdk(adjustConfig)
 
         if let userInfo = launchOptions?[.remoteNotification] as? [AnyHashable: Any] {
@@ -74,14 +78,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         let apnsToken = deviceToken.map { String(format: "%02x", $0) }.joined()
         UserDefaults.standard.set(apnsToken, forKey: "apnsToken")
         print("APNS token:", apnsToken)
+        DebugLogStore.shared.append("APNS token=\(apnsToken)")
 
         Messaging.messaging().token { token, error in
             if let error {
                 print("=== FCM_TOKEN_FETCH_AFTER_APNS_ERROR === \(error.localizedDescription)")
+                DebugLogStore.shared.append("FCM token fetch after APNS error=\(error.localizedDescription)")
                 return
             }
             let value = token?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "null"
             print("=== FCM_TOKEN_FETCH_AFTER_APNS === \(value)")
+            DebugLogStore.shared.append("FCM token fetch after APNS=\(value)")
             self.saveAndPublishFCMToken(token, source: "afterAPNSTokenFetch")
         }
     }
@@ -90,6 +97,7 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         UserDefaults.standard.set("null", forKey: "fcmToken")
         print("APNS registration failed:", error.localizedDescription)
         print("=== APNS_REGISTRATION_ERROR === \(error.localizedDescription)")
+        DebugLogStore.shared.append("APNS registration failed=\(error.localizedDescription)")
     }
 
     func userNotificationCenter(
@@ -138,6 +146,7 @@ private extension AppDelegate {
             UserDefaults.standard.set(normalizedToken, forKey: "fcmToken")
             print("FCM token (\(source)):", normalizedToken)
             print("=== FCM_TOKEN === \(normalizedToken)")
+            DebugLogStore.shared.append("FCM token source=\(source) value=\(normalizedToken)")
             NotificationCenter.default.post(
                 Notification(name: NSNotification.Name("tokenReceivedPublisher"), object: nil)
             )
@@ -147,6 +156,7 @@ private extension AppDelegate {
         UserDefaults.standard.set("null", forKey: "fcmToken")
         print("FCM token (\(source)): null")
         print("=== FCM_TOKEN === null")
+        DebugLogStore.shared.append("FCM token source=\(source) value=null")
     }
 
     func notifyPushClicked(pushId: String?, source: String) {
@@ -167,10 +177,12 @@ private extension AppDelegate {
 
         guard shouldDispatch else {
             print("pushClicked dedup skip source=\(source) push_id=\(normalizedPushId)")
+            DebugLogStore.shared.append("pushClicked dedup skip source=\(source) push_id=\(normalizedPushId)")
             return
         }
 
         DispatchQueue.main.async {
+            DebugLogStore.shared.append("pushClicked notification source=\(source) push_id=\(normalizedPushId)")
             NotificationCenter.default.post(name: NSNotification.Name("pushClicked"), object: nil)
         }
     }
@@ -212,17 +224,21 @@ private extension AppDelegate {
         if let pushId = extractPushId(from: userInfo as Any), !pushId.isEmpty {
             UserDefaults.standard.set(pushId, forKey: "lastPushId")
             print("push_id (\(source)):", pushId)
+            DebugLogStore.shared.append("push_id source=\(source) value=\(pushId)")
             if let data = try? JSONSerialization.data(withJSONObject: userInfo, options: [.prettyPrinted]),
                let text = String(data: data, encoding: .utf8) {
                 UserDefaults.standard.set(text, forKey: "lastPushUserInfoDump")
+                DebugLogStore.shared.append("push userInfo source=\(source) value=\(text)")
             }
             return pushId
         }
 
         print("push_id (\(source)) отсутствует")
+        DebugLogStore.shared.append("push_id source=\(source) missing")
         if let data = try? JSONSerialization.data(withJSONObject: userInfo, options: [.prettyPrinted]),
            let text = String(data: data, encoding: .utf8) {
             UserDefaults.standard.set(text, forKey: "lastPushUserInfoDump")
+            DebugLogStore.shared.append("push userInfo source=\(source) value=\(text)")
         }
         return nil
     }
