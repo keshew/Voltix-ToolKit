@@ -139,7 +139,7 @@ private final class WebBootstrapViewModel: ObservableObject {
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(resolvedClientUUID(), forHTTPHeaderField: "client-uuid")
         request.setValue(userAgent, forHTTPHeaderField: "User-Agent")
-        let adjustAttribution = await waitForAdjustAttribution(upToSeconds: 5)
+        let adjustAttribution = await waitForAdjustAttribution(upToSeconds: 12)
         let requestBody: [String: Any] = [
             "adjust": adjustAttribution,
             "referrer": referrer
@@ -238,18 +238,38 @@ private final class WebBootstrapViewModel: ObservableObject {
 
     private func waitForAdjustAttribution(upToSeconds seconds: Int) async -> [String: Any] {
         for _ in 0..<seconds {
-            if let jsonString = UserDefaults.standard.string(forKey: "lastAdjustAttribution"),
-               !jsonString.isEmpty,
-               jsonString.data(using: .utf8)?.isEmpty == false {
-                break
+            if let jsonDictionary = storedAdjustAttributionDictionary(),
+               attributionHasCampaignSignal(jsonDictionary) {
+                return normalizedAdjustAttribution(from: jsonDictionary)
             }
             try? await Task.sleep(nanoseconds: 1_000_000_000)
         }
 
+        guard let jsonDictionary = storedAdjustAttributionDictionary() else {
+            return [:]
+        }
+
+        return normalizedAdjustAttribution(from: jsonDictionary)
+    }
+
+    private func storedAdjustAttributionDictionary() -> [String: Any]? {
         guard let jsonString = UserDefaults.standard.string(forKey: "lastAdjustAttribution"),
               let jsonData = jsonString.data(using: .utf8),
+              !jsonData.isEmpty,
               let jsonDictionary = try? JSONSerialization.jsonObject(with: jsonData, options: []) as? [String: Any] else {
-            return [:]
+            return nil
+        }
+
+        return jsonDictionary
+    }
+
+    private func normalizedAdjustAttribution(from jsonDictionary: [String: Any]) -> [String: Any] {
+        let jsonString: String
+        if let data = try? JSONSerialization.data(withJSONObject: jsonDictionary, options: []),
+           let encoded = String(data: data, encoding: .utf8) {
+            jsonString = encoded
+        } else {
+            jsonString = UserDefaults.standard.string(forKey: "lastAdjustAttribution") ?? ""
         }
 
         return [
@@ -265,6 +285,31 @@ private final class WebBootstrapViewModel: ObservableObject {
             "costCurrency": jsonDictionary["costCurrency"] as? String ?? "",
             "jsonResponse": jsonString
         ]
+    }
+
+    private func attributionHasCampaignSignal(_ jsonDictionary: [String: Any]) -> Bool {
+        func text(_ key: String) -> String {
+            (jsonDictionary[key] as? String ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        if !text("campaign").isEmpty { return true }
+        if !text("adgroup").isEmpty { return true }
+        if !text("creative").isEmpty { return true }
+        if !text("clickLabel").isEmpty { return true }
+        if !text("trackerToken").isEmpty { return true }
+
+        let network = text("network").lowercased()
+        if !network.isEmpty, network != "organic" {
+            return true
+        }
+
+        let trackerName = text("trackerName").lowercased()
+        if !trackerName.isEmpty, trackerName != "organic" {
+            return true
+        }
+
+        return false
     }
 
     private func configureControlsLink() async {

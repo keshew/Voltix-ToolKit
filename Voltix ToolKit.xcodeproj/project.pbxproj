@@ -9,6 +9,7 @@
 /* Begin PBXBuildFile section */
 		868CBA5E2FF26A5100E5F9A4 /* AdjustSdk in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA5D2FF26A5100E5F9A4 /* AdjustSdk */; };
 		868CBA602FF26A5100E5F9A4 /* AdjustWebBridge in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA5F2FF26A5100E5F9A4 /* AdjustWebBridge */; };
+		868CBA6A2FF26B5100E5F9A4 /* AdjustGoogleOdm in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */; };
 		868CBA662FF26B5100E5F9A4 /* FirebaseCore in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA652FF26B5100E5F9A4 /* FirebaseCore */; };
 		868CBA682FF26B5100E5F9A4 /* FirebaseMessaging in Frameworks */ = {isa = PBXBuildFile; productRef = 868CBA672FF26B5100E5F9A4 /* FirebaseMessaging */; };
 /* End PBXBuildFile section */
@@ -32,6 +33,7 @@
 			files = (
 				868CBA5E2FF26A5100E5F9A4 /* AdjustSdk in Frameworks */,
 				868CBA602FF26A5100E5F9A4 /* AdjustWebBridge in Frameworks */,
+				868CBA6A2FF26B5100E5F9A4 /* AdjustGoogleOdm in Frameworks */,
 				868CBA662FF26B5100E5F9A4 /* FirebaseCore in Frameworks */,
 				868CBA682FF26B5100E5F9A4 /* FirebaseMessaging in Frameworks */,
 			);
@@ -78,6 +80,7 @@
 			packageProductDependencies = (
 				868CBA5D2FF26A5100E5F9A4 /* AdjustSdk */,
 				868CBA5F2FF26A5100E5F9A4 /* AdjustWebBridge */,
+				868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */,
 				868CBA652FF26B5100E5F9A4 /* FirebaseCore */,
 				868CBA672FF26B5100E5F9A4 /* FirebaseMessaging */,
 			);
@@ -391,6 +394,11 @@
 			isa = XCSwiftPackageProductDependency;
 			package = 868CBA5C2FF26A5100E5F9A4 /* XCRemoteSwiftPackageReference "ios_sdk" */;
 			productName = AdjustWebBridge;
+		};
+		868CBA692FF26B5100E5F9A4 /* AdjustGoogleOdm */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = 868CBA5C2FF26A5100E5F9A4 /* XCRemoteSwiftPackageReference "ios_sdk" */;
+			productName = AdjustGoogleOdm;
 		};
 		868CBA652FF26B5100E5F9A4 /* FirebaseCore */ = {
 			isa = XCSwiftPackageProductDependency;

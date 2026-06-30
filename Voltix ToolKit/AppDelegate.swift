@@ -13,14 +13,22 @@ final class AdjustAttributionHandler: NSObject, AdjustDelegate {
     func adjustAttributionChanged(_ attribution: ADJAttribution?) {
         guard let attribution else { return }
 
+        if #available(iOS 14, *),
+           ATTrackingManager.trackingAuthorizationStatus == .notDetermined {
+            print("Adjust attribution received before ATT decision, skipping save for now")
+            return
+        }
+
         guard let jsonResponse = attribution.jsonResponse,
               let data = try? JSONSerialization.data(withJSONObject: jsonResponse, options: []),
               let jsonString = String(data: data, encoding: .utf8) else {
             UserDefaults.standard.removeObject(forKey: "lastAdjustAttribution")
+            print("Adjust attribution jsonResponse is empty")
             return
         }
 
         UserDefaults.standard.set(jsonString, forKey: "lastAdjustAttribution")
+        print("Adjust attribution saved:", jsonString)
     }
 }
 
